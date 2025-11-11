@@ -68,15 +68,52 @@ class SegDataset(Dataset):
 
     def _random_augment(self, img: Image.Image, mask: Image.Image) -> Tuple[Image.Image, Image.Image]:
         # Simple augmentation: horizontal flip + random 90-degree rotations
+        # import torch
+        # if torch.rand(1).item() < 0.5:
+        #     img = TF.hflip(img); mask = TF.hflip(mask)
+        # if torch.rand(1).item() < 0.5:
+        #     k = int(torch.randint(0, 4, (1,)).item())
+        #     if k:
+        #         img = TF.rotate(img, 90 * k)
+        #         mask = TF.rotate(mask, 90 * k)
+        # return img, mask
+
         import torch
+        import torchvision.transforms.functional as TF
+        import random
+
+        # Horizontal flip
         if torch.rand(1).item() < 0.5:
-            img = TF.hflip(img); mask = TF.hflip(mask)
+            img = TF.hflip(img)
+            mask = TF.hflip(mask)
+
+        # Vertical flip
+        if torch.rand(1).item() < 0.3:
+            img = TF.vflip(img)
+            mask = TF.vflip(mask)
+
+        # Small random rotation (-15° to +15°)
         if torch.rand(1).item() < 0.5:
-            k = int(torch.randint(0, 4, (1,)).item())
-            if k:
-                img = TF.rotate(img, 90 * k)
-                mask = TF.rotate(mask, 90 * k)
+            angle = random.uniform(-15, 15)
+            img = TF.rotate(img, angle, interpolation=TF.InterpolationMode.BILINEAR)
+            mask = TF.rotate(mask, angle, interpolation=TF.InterpolationMode.NEAREST)
+
+        # Random affine transform (translation + scale)
+        if torch.rand(1).item() < 0.4:
+            translate = (random.uniform(-0.05, 0.05), random.uniform(-0.05, 0.05))
+            scale = random.uniform(0.9, 1.1)
+            img = TF.affine(img, angle=0, translate=(int(translate[0] * img.width), int(translate[1] * img.height)),
+                            scale=scale, shear=[0.0, 0.0], interpolation=TF.InterpolationMode.BILINEAR)
+            mask = TF.affine(mask, angle=0, translate=(int(translate[0] * mask.width), int(translate[1] * mask.height)),
+                             scale=scale, shear=[0.0, 0.0], interpolation=TF.InterpolationMode.NEAREST)
+
+        # Random brightness/contrast jitter
+        if torch.rand(1).item() < 0.5:
+            img = TF.adjust_brightness(img, random.uniform(0.8, 1.2))
+            img = TF.adjust_contrast(img, random.uniform(0.8, 1.2))
+
         return img, mask
+
 
     def __getitem__(self, idx: int):
         img_p, lbl_p = self.samples[idx]

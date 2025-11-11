@@ -1,4 +1,6 @@
 import argparse
+import matplotlib
+matplotlib.use("Agg")
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -26,11 +28,11 @@ def train_one_epoch(model, loader, device, criterion, bce, optimizer, scaler=Non
         masks = batch["mask"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=scaler is not None):
+        with torch.amp.autocast('cuda', enabled=scaler is not None):
             logits = model(imgs)
             loss_dice = criterion(logits, masks)
             loss_bce = bce(logits, masks)
-            loss = 0.5 * loss_bce + 0.5 * loss_dice
+            loss = 0.3 * loss_bce + 0.7 * loss_dice
             probs = torch.sigmoid(logits)
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -39,7 +41,7 @@ def train_one_epoch(model, loader, device, criterion, bce, optimizer, scaler=Non
         else:
             loss.backward()
             optimizer.step()
-
+        # print("LOGIT SHAPE:", logits.shape, masks.shape)
         running_loss += loss.item() * imgs.size(0)
         running_dice += dice_coeff(probs.detach(), masks)
         running_iou  += iou_score(probs.detach(), masks)
@@ -67,6 +69,8 @@ def evaluate(model, loader, device, criterion, bce):
     return running_loss / n, running_dice / len(loader), running_iou / len(loader)
 
 def main():
+    from model import StudentModel
+    print(StudentModel)
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_dir", type=str, default="./ADDA")
     ap.add_argument("--train_csv", type=str, default="train.csv")
@@ -82,7 +86,6 @@ def main():
     args = ap.parse_args()
 
     set_seed(args.seed)
-    print("ATTENTION: " , torch.cuda.is_available())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     print("Using device:", device)
@@ -92,11 +95,15 @@ def main():
                           root_dir=args.data_dir, 
                           image_root_sub="png_256/images",
                           label_root_sub="png_256/labels",
+                          # image_root_sub="png_256/small_set_images",
+                          # label_root_sub="png_256/small_set_labels",
                           img_size=args.img_size, augment=True)
     val_ds   = SegDataset(csv_path=Path(args.data_dir) / args.val_csv,
                           root_dir=args.data_dir,
                           image_root_sub="png_256/images",
                           label_root_sub="png_256/labels",
+                          # image_root_sub="png_256/small_set_images",
+                          # label_root_sub="png_256/small_set_labels",
                           img_size=args.img_size, augment=False)
 
     train_ld = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -104,15 +111,19 @@ def main():
     val_ld   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
                           num_workers=args.num_workers, pin_memory=True)
 
-    model = StudentModel(in_ch=1, base_ch=32).to(device)
+    model = StudentModel().to(device)
     dice_loss = DiceLoss()
     bce_loss = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5)
+    scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
     history = {"train_loss":[], "val_loss":[], "train_dice":[], "val_dice":[], "train_iou":[], "val_iou":[]}
     best_dice, best_path = -1.0, out_dir / "best_model.pt"
-
+    best_val_dice = -1.0
+    patience = 5
+    counter = 0
     for epoch in range(1, args.epochs+1):
         tr_loss, tr_dice, tr_iou = train_one_epoch(model, train_ld, device, dice_loss, bce_loss, optimizer, scaler)
         va_loss, va_dice, va_iou = evaluate(model, val_ld, device, dice_loss, bce_loss)
@@ -129,8 +140,19 @@ def main():
             best_dice = va_dice
             torch.save({"epoch": epoch, "state_dict": model.state_dict(), "dice": best_dice, "cfg": vars(args)}, best_path)
             print(f"  -> Saved best: {best_path} (dice={best_dice:.4f})")
+            counter = 0
+        else:
+            counter += 1
+            print(f"  -> No improvement, counter={counter}/{patience}")
+
+        if counter >= patience:
+            print(f"Early stopping triggered. Best val dice: {best_val_dice:.4f}")
+            break
 
         save_history_and_curves(history, out_dir)
+
+        scheduler.step(va_loss)
+        # scheduler.step()
 
     torch.save({"epoch": args.epochs, "state_dict": model.state_dict(), "dice": best_dice, "cfg": vars(args)}, out_dir / "last_model.pt")
     print("Training finished. Best dice:", best_dice)
