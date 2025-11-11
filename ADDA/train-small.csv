@@ -1,0 +1,2 @@
+subject_id,slice_idx,set,ct_path,label_path
+CHUP-000,206,train,../ADDA/png_256/images/CHUP-000__CT_206.png,../ADDA/png_256/labels/CHUP-000_206.png

@@ -1,0 +1,2 @@
+subject_id,slice_idx,set,dataset,ct_path,pet_path,label_path,not_black_frame,tumor,split
+MDA-196,69,validation,source,../ADDA/png_256/images/MDA-196__CT_69.png,../datasets/ADDA/png_256/images/MDA-196__PT_69.png,../ADDA/png_256/labels/MDA-196_69.png,1,1,val
