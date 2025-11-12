@@ -92,9 +92,9 @@ class SegDataset(Dataset):
             img = TF.vflip(img)
             mask = TF.vflip(mask)
 
-        # Small random rotation (-15° to +15°)
+        # Small random rotation (-90° to +90°)
         if torch.rand(1).item() < 0.5:
-            angle = random.uniform(-15, 15)
+            angle = random.uniform(-90, 90)
             img = TF.rotate(img, angle, interpolation=TF.InterpolationMode.BILINEAR)
             mask = TF.rotate(mask, angle, interpolation=TF.InterpolationMode.NEAREST)
 

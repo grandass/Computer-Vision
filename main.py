@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from dataset import SegDataset
-from model import StudentModel
 from utils import set_seed, dice_coeff, iou_score, save_history_and_curves
 
 class DiceLoss(nn.Module):
@@ -32,7 +31,7 @@ def train_one_epoch(model, loader, device, criterion, bce, optimizer, scaler=Non
             logits = model(imgs)
             loss_dice = criterion(logits, masks)
             loss_bce = bce(logits, masks)
-            loss = 0.3 * loss_bce + 0.7 * loss_dice
+            loss = 0.5 * loss_bce + 0.5 * loss_dice
             probs = torch.sigmoid(logits)
         if scaler is not None:
             scaler.scale(loss).backward()
@@ -41,7 +40,6 @@ def train_one_epoch(model, loader, device, criterion, bce, optimizer, scaler=Non
         else:
             loss.backward()
             optimizer.step()
-        # print("LOGIT SHAPE:", logits.shape, masks.shape)
         running_loss += loss.item() * imgs.size(0)
         running_dice += dice_coeff(probs.detach(), masks)
         running_iou  += iou_score(probs.detach(), masks)
@@ -95,15 +93,11 @@ def main():
                           root_dir=args.data_dir, 
                           image_root_sub="png_256/images",
                           label_root_sub="png_256/labels",
-                          # image_root_sub="png_256/small_set_images",
-                          # label_root_sub="png_256/small_set_labels",
                           img_size=args.img_size, augment=True)
     val_ds   = SegDataset(csv_path=Path(args.data_dir) / args.val_csv,
                           root_dir=args.data_dir,
                           image_root_sub="png_256/images",
                           label_root_sub="png_256/labels",
-                          # image_root_sub="png_256/small_set_images",
-                          # label_root_sub="png_256/small_set_labels",
                           img_size=args.img_size, augment=False)
 
     train_ld = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
@@ -115,8 +109,7 @@ def main():
     dice_loss = DiceLoss()
     bce_loss = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
-    # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, cooldown=1)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
     history = {"train_loss":[], "val_loss":[], "train_dice":[], "val_dice":[], "train_iou":[], "val_iou":[]}
@@ -152,7 +145,6 @@ def main():
         save_history_and_curves(history, out_dir)
 
         scheduler.step(va_loss)
-        # scheduler.step()
 
     torch.save({"epoch": args.epochs, "state_dict": model.state_dict(), "dice": best_dice, "cfg": vars(args)}, out_dir / "last_model.pt")
     print("Training finished. Best dice:", best_dice)

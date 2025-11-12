@@ -44,7 +44,7 @@ python main.py --data_dir "./ADDA" --epochs 30 --batch_size 8 --img_size 256 --l
 
 ### 3) Inference (single image)
 ```bash
-python inference.py --ckpt ./runs/exp_ADDA/best_model.pt --image "./ADDA/png_256/images/your_image.png" --out_dir "./runs/exp_ADDA/preds"
+python inference.py --ckpt ./runs/exp1/best_model.pt --image "./ADDA/png_256/images/CHUP-000__CT_206.png" --out_dir "./runs/exp1/preds"  
 ```
 
 ### 4) Inference (folder)
