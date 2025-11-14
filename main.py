@@ -109,7 +109,11 @@ def main():
     dice_loss = DiceLoss()
     bce_loss = nn.BCEWithLogitsLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, cooldown=1)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30, eta_min=1e-6)
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optimizer, T_0=10, T_mult=2, eta_min=1e-6
+    # )
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
 
     history = {"train_loss":[], "val_loss":[], "train_dice":[], "val_dice":[], "train_iou":[], "val_iou":[]}
@@ -151,3 +155,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# more data augmentation
+# deep supervision
+# drop / spatial dropout, decoder blocks, spatialdropout2d
+# cosineannealingLR
+# weight initialization
