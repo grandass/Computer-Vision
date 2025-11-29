@@ -12,7 +12,6 @@ class EfficientNetEncoder(nn.Module):
         weights = EfficientNet_B0_Weights.DEFAULT if pretrained else None
         effnet = efficientnet_b0(weights=weights)
         if in_ch != 3:
-            # replace first conv to accept in_ch while keeping feature sizing
             effnet.features[0][0] = nn.Conv2d(in_ch, 32, kernel_size=3, stride=2, padding=1, bias=False)
         self.features = effnet.features
 
@@ -22,8 +21,8 @@ class EfficientNetEncoder(nn.Module):
             x = block(x)
             if i in [1, 2, 3, 4, 6]:
                 skips.append(x)
-        # expected skips channels (torchvision effnet_b0): [16, 24, 40, 80, 192]
-        return skips  # skip0, skip1, skip2, skip3, skip4
+        # skip0, skip1, skip2, skip3, skip4 channels: 16,24,40,80,192
+        return skips
 
 # --------------------------
 # ConvBlock used in decoder
@@ -31,8 +30,6 @@ class EfficientNetEncoder(nn.Module):
 class ConvBlock(nn.Module):
     def __init__(self, cin, cout, dropout=0.2):
         super().__init__()
-        # GroupNorm(group_count, num_channels) requires num_channels % group_count == 0.
-        # We use 8 groups, which divides the channel numbers used below.
         self.block = nn.Sequential(
             nn.Conv2d(cin, cout, kernel_size=3, padding=1, bias=False),
             nn.GroupNorm(8, cout),
@@ -47,58 +44,86 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 # --------------------------
-# Full FCN with proper channel math and upsampling
+# Attention Gate
 # --------------------------
-class EfficientNetFCN(nn.Module):
+class AttentionGate(nn.Module):
+    def __init__(self, F_g, F_l, F_int):
+        super().__init__()
+        self.W_g = nn.Sequential(
+            nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.GroupNorm(8, F_int)
+        )
+        self.W_x = nn.Sequential(
+            nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.GroupNorm(8, F_int)
+        )
+        self.psi = nn.Sequential(
+            nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0, bias=True),
+            nn.Sigmoid()
+        )
+        self.relu = nn.LeakyReLU(inplace=True)
+
+    def forward(self, x, g):
+        g1 = self.W_g(g)
+        x1 = self.W_x(x)
+        psi = self.relu(g1 + x1)
+        psi = self.psi(psi)
+        return x * psi
+
+# --------------------------
+# Full FCN with attention
+# --------------------------
+class EfficientNetFCN_Attention(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, dropout=0.2):
         super().__init__()
         self.encoder = EfficientNetEncoder(in_ch=in_ch, pretrained=True)
 
-        # Based on encoder skip channels: skip0=16, skip1=24, skip2=40, skip3=80, skip4=192
-        # Stage 1: combine upsampled skip4 (192) with skip3 (80) -> 272 in
+        # Conv blocks
         self.c4 = ConvBlock(192 + 80, 128, dropout=dropout)
-
-        # Stage 2: upsample c4 (128) concat skip2 (40) -> 168 in
         self.c3 = ConvBlock(128 + 40, 64, dropout=dropout)
-
-        # Stage 3: upsample c3 (64) concat skip1 (24) -> 88 in
         self.c2 = ConvBlock(64 + 24, 32, dropout=dropout)
-
-        # Stage 4: upsample c2 (32) concat skip0 (16) -> 48 in
         self.c1 = ConvBlock(32 + 16, 32, dropout=dropout)
 
-        # final conv -> produce logits at full input resolution later
+        # Attention gates (F_g = decoder channels, F_l = skip channels)
+        self.att4 = AttentionGate(F_g=192, F_l=80, F_int=64)
+        self.att3 = AttentionGate(F_g=128, F_l=40, F_int=32)
+        self.att2 = AttentionGate(F_g=64, F_l=24, F_int=16)
+        self.att1 = AttentionGate(F_g=32, F_l=16, F_int=16)
+
+        # Final conv
         self.head = nn.Conv2d(32, out_ch, kernel_size=1)
 
     def forward(self, x):
-        # x: [B, C, H, W]
-        input_size = x.shape[2:]  # keep original input size for final upsample
-        skips = self.encoder(x)
-        skip0, skip1, skip2, skip3, skip4 = skips  # channels: 16,24,40,80,192
+        input_size = x.shape[2:]
+        skip0, skip1, skip2, skip3, skip4 = self.encoder(x)
 
-        # Stage 1: skip4 (8x8) -> match skip3 (16x16)
+        # Stage 1: skip4 -> skip3
         y = F.interpolate(skip4, size=skip3.shape[2:], mode='bilinear', align_corners=False)
-        y = torch.cat([y, skip3], dim=1)  # 192 + 80 = 272 channels
-        y = self.c4(y)                     # out: 128 channels @ 16x16
+        skip3_att = self.att4(skip3, y)
+        y = torch.cat([y, skip3_att], dim=1)
+        y = self.c4(y)
 
-        # Stage 2: upsample to skip2 (32x32)
+        # Stage 2: skip3 -> skip2
         y = F.interpolate(y, size=skip2.shape[2:], mode='bilinear', align_corners=False)
-        y = torch.cat([y, skip2], dim=1)  # 128 + 40 = 168 channels
-        y = self.c3(y)                     # out: 64 channels @ 32x32
+        skip2_att = self.att3(skip2, y)
+        y = torch.cat([y, skip2_att], dim=1)
+        y = self.c3(y)
 
-        # Stage 3: upsample to skip1 (64x64)
+        # Stage 3: skip2 -> skip1
         y = F.interpolate(y, size=skip1.shape[2:], mode='bilinear', align_corners=False)
-        y = torch.cat([y, skip1], dim=1)  # 64 + 24 = 88 channels
-        y = self.c2(y)                     # out: 32 channels @ 64x64
+        skip1_att = self.att2(skip1, y)
+        y = torch.cat([y, skip1_att], dim=1)
+        y = self.c2(y)
 
-        # Stage 4: upsample to skip0 (128x128)
+        # Stage 4: skip1 -> skip0
         y = F.interpolate(y, size=skip0.shape[2:], mode='bilinear', align_corners=False)
-        y = torch.cat([y, skip0], dim=1)  # 32 + 16 = 48 channels
-        y = self.c1(y)                     # out: 32 channels @ 128x128
+        skip0_att = self.att1(skip0, y)
+        y = torch.cat([y, skip0_att], dim=1)
+        y = self.c1(y)
 
-        # Final upsample to input size (e.g., 256x256) and head
-        y = F.interpolate(y, size=input_size, mode='bilinear', align_corners=False)  # now same as input
-        logits = self.head(y)  # [B, out_ch, H, W]
+        # Final upsample
+        y = F.interpolate(y, size=input_size, mode='bilinear', align_corners=False)
+        logits = self.head(y)
         return logits
 
 # --------------------------
@@ -107,7 +132,7 @@ class EfficientNetFCN(nn.Module):
 class StudentModel(nn.Module):
     def __init__(self, in_ch=1, out_ch=1, dropout=0.2):
         super().__init__()
-        self.net = EfficientNetFCN(in_ch=in_ch, out_ch=out_ch, dropout=dropout)
+        self.net = EfficientNetFCN_Attention(in_ch=in_ch, out_ch=out_ch, dropout=dropout)
 
     def forward(self, x):
         return self.net(x)
